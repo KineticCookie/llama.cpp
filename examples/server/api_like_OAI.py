@@ -4,6 +4,7 @@ import urllib.parse
 import requests
 import time
 import json
+import tiktoken
 
 
 app = Flask(__name__)
@@ -32,8 +33,7 @@ def is_present(json, key):
 
 #convert chat to prompt
 def convert_chat(messages):
-    prompt = "" + args.chat_prompt.replace("\\n", "\n")
-
+    prompt = "" #+ args.chat_prompt.replace("\\n", "\n")
     system_n = args.system_name.replace("\\n", "\n")
     user_n = args.user_name.replace("\\n", "\n")
     ai_n = args.ai_name.replace("\\n", "\n")
@@ -42,12 +42,11 @@ def convert_chat(messages):
 
     for line in messages:
         if (line["role"] == "system"):
-            prompt += f"{system_n}{line['content']}"
+            prompt += f"<<SYS>{line['content']}<</SYS>"
         if (line["role"] == "user"):
-            prompt += f"{user_n}{line['content']}"
+            prompt += f"[INST]{line['content']}[/INST]"
         if (line["role"] == "assistant"):
-            prompt += f"{ai_n}{line['content']}{stop}"
-    prompt += ai_n.rstrip()
+            prompt += f"{line['content']}{stop}"
 
     return prompt
 
@@ -76,6 +75,10 @@ def make_postData(body, chat=False, stream=False):
     if(is_present(body, "stop")): postData["stop"] += body["stop"]
     postData["n_keep"] = -1
     postData["stream"] = stream
+    if "grammar" in body:
+        postData["grammar"] = body["grammar"]
+    if postData.get("n_predict") is None:
+        postData["n_predict"] = -1
 
     return postData
 
@@ -164,10 +167,14 @@ def chat_completions():
         promptToken = tokenData["tokens"]
 
     if (not stream):
+        print(json.dumps(postData))
         data = requests.request("POST", urllib.parse.urljoin(args.llama_api, "/completion"), data=json.dumps(postData))
-        print(data.json())
-        resData = make_resData(data.json(), chat=True, promptToken=promptToken)
-        return jsonify(resData)
+        try:
+            print(data.json())
+            resData = make_resData(data.json(), chat=True, promptToken=promptToken)
+            return jsonify(resData)
+        except Exception:
+            return Response(data.content, data.status_code)
     else:
         def generate():
             data = requests.request("POST", urllib.parse.urljoin(args.llama_api, "/completion"), data=json.dumps(postData), stream=True)
@@ -214,6 +221,29 @@ def completion():
                     resData = make_resData_stream(json.loads(decoded_line[6:]), chat=False, time_now=time_now)
                     yield 'data: {}\n'.format(json.dumps(resData))
         return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/embeddings', methods=['POST'])
+@app.route('/v1/embeddings', methods=['POST'])
+def embeddings():
+    if (args.api_key != "" and request.headers["Authorization"].split()[1] != args.api_key):
+        return Response(status=403)
+    body = request.get_json()
+    if body['encoding_format'] == 'base64':
+        encoder = tiktoken.get_encoding("cl100k_base")
+        body["content"] = encoder.decode_batch(body['input'])
+    print(body)
+
+    if isinstance(body['content'], list):
+        all_embeddings = []
+        for content in body['content']:
+            embeddings = requests.request("POST", urllib.parse.urljoin(args.llama_api, "/embedding"), data=json.dumps({"content": content})).json()
+            all_embeddings.append(embeddings)
+        return jsonify({
+            "data": all_embeddings
+        })
+    else:
+        embeddings = requests.request("POST", urllib.parse.urljoin(args.llama_api, "/embedding"), data=json.dumps(body)).json()
+        return jsonify(embeddings)
 
 if __name__ == '__main__':
     app.run(args.host, port=args.port)
